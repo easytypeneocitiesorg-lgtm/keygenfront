@@ -68,6 +68,18 @@
   .pill.active{color:var(--ok);border-color:#2c5a45;background:#16271f}
   .pill.expired{color:var(--dim)}
   .pill.deactivated{color:var(--red);border-color:#6a3338;background:#2a1719}
+  .pill.archived{color:var(--dim);border-style:dashed;margin-left:6px}
+  tr.archived td{opacity:.62}
+  tr.archived td.actions-cell{opacity:1}
+  .toggle{position:relative;display:flex;align-items:center;gap:8px;color:var(--dim);font-size:13px;cursor:pointer;user-select:none}
+  .toggle input{position:absolute;opacity:0;width:1px;height:1px}
+  .sw{width:34px;height:20px;border-radius:99px;background:var(--raise);border:1px solid var(--line);position:relative;transition:background .15s,border-color .15s}
+  .sw::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--dim);transition:transform .15s,background .15s}
+  .toggle input:checked + .sw{background:#41330f;border-color:var(--gold)}
+  .toggle input:checked + .sw::after{transform:translateX(14px);background:var(--gold)}
+  .toggle input:focus-visible + .sw{outline:2px solid var(--gold);outline-offset:2px}
+  .toggle:hover{color:var(--text)}
+  @media (prefers-reduced-motion:reduce){ .sw,.sw::after{transition:none} }
   .pill.yes{color:var(--blue);border-color:#33466f;background:#161d2e}
   .actions{display:flex;gap:6px}
   .actions button{padding:3px 10px;font-size:12px;border-radius:6px}
@@ -126,11 +138,15 @@
         <option value="deactivated">Deactivated</option>
       </select>
       <button id="refresh">Refresh</button>
+      <label class="toggle" title="Include archived keys in the list">
+        <input type="checkbox" id="showarch"><span class="sw" aria-hidden="true"></span>Show archived
+      </label>
       <div class="stats">
         <span>Total <b id="s-total">0</b></span>
         <span>Active <b id="s-active">0</b></span>
         <span>Unused <b id="s-unused">0</b></span>
         <span>Used <b id="s-used">0</b></span>
+        <span>Archived <b id="s-arch">0</b></span>
       </div>
     </div>
     <div id="listerr" role="alert"></div>
@@ -143,7 +159,8 @@
       </table>
     </div>
     <div class="note">Deactivating a key signs out anyone using it (or waiting in the queue with it) within a few seconds.
-      &ldquo;Release&rdquo; frees a used key so a different device can use it.</div>
+      &ldquo;Release&rdquo; frees a used key so a different device can use it.
+      Deactivated or expired keys can be archived to hide them from the list.</div>
   </section>
 </div>
 
@@ -287,13 +304,16 @@
 
   function render() {
     const q = $('#search').value.trim().toUpperCase(), f = $('#filter').value;
-    const total = keys.length, st = keys.map(statusOf);
+    const showArch = $('#showarch').checked;
+    const scope = showArch ? keys : keys.filter(k => !k.archived);
+    const total = scope.length, st = scope.map(statusOf);
     $('#s-total').textContent = total;
     $('#s-active').textContent = st.filter(s => s === 'active').length;
-    $('#s-unused').textContent = keys.filter((k, i) => st[i] === 'active' && !k.used).length;
-    $('#s-used').textContent = keys.filter(k => k.used).length;
+    $('#s-unused').textContent = scope.filter((k, i) => st[i] === 'active' && !k.used).length;
+    $('#s-used').textContent = scope.filter(k => k.used).length;
+    $('#s-arch').textContent = keys.filter(k => k.archived).length;
 
-    const shown = keys.filter((k, i) => {
+    const shown = scope.filter((k, i) => {
       if (q && !(k.tag || '').includes(q)) return false;
       if (f === 'active') return st[i] === 'active';
       if (f === 'unused') return st[i] === 'active' && !k.used;
@@ -304,15 +324,20 @@
 
     const body = $('#rows'); body.textContent = ''; cells.length = 0;
     if (!shown.length) {
-      const tr = document.createElement('tr'), c = td(total ? 'No keys match.' : 'No keys yet \u2014 generate one above.', 'empty');
+      const hidden = !showArch && keys.some(k => k.archived);
+      const msg = !keys.length ? 'No keys yet \u2014 generate one above.'
+        : hidden ? 'No keys match. Archived keys are hidden \u2014 turn on \u201cShow archived\u201d to include them.'
+        : 'No keys match.';
+      const tr = document.createElement('tr'), c = td(msg, 'empty');
       c.colSpan = 8; tr.append(c); body.append(tr); return;
     }
     for (const k of shown) {
       const tr = document.createElement('tr');
+      if (k.archived) tr.className = 'archived';
       const status = td(), lf = td(null, 'mono');
       const used = td(); used.append(k.used ? pill('Yes', 'yes') : pill('No', ''));
       if (k.used && k.usedAt) used.title = 'First used ' + fmtDate(k.usedAt);
-      const act = td(); const box = document.createElement('div'); box.className = 'actions'; act.append(box);
+      const act = td(null, 'actions-cell'); const box = document.createElement('div'); box.className = 'actions'; act.append(box);
 
       const copy = document.createElement('button'); copy.textContent = 'Copy';
       copy.onclick = async () => {
@@ -331,28 +356,42 @@
         await loadKeys(true);
       });
       rel.title = 'Let a different device use this key';
-      box.append(deact, rel);
+      const arch = document.createElement('button');
+      arch.textContent = k.archived ? 'Unarchive' : 'Archive';
+      arch.title = k.archived ? 'Show this key in the main list again' : 'Hide this key from the list';
+      arch.onclick = async () => {
+        arch.disabled = true;
+        const r = await api('/api/archive', {key: k.key, archived: !k.archived});
+        if (r && !r.ok) $('#listerr').textContent = r.data.error || 'Could not archive.';
+        await loadKeys(true);
+      };
+      box.append(deact, rel, arch);
 
       tr.append(td(k.tag, 'id'), td(k.key, 'mono'), td(KIND[k.kind] || k.kind), used, status, lf, td(fmtDate(k.created)), act);
       body.append(tr);
-      cells.push({k, status, lf, deact, rel});
+      cells.push({k, status, lf, deact, rel, arch});
     }
     tick();
   }
 
   function tick() {
     for (const c of cells) {
-      const s = statusOf(c.k);
-      if (c.status.dataset.s !== s) {
-        c.status.dataset.s = s; c.status.textContent = '';
+      const s = statusOf(c.k), sig = s + (c.k.archived ? '+a' : '');
+      if (c.status.dataset.s !== sig) {
+        c.status.dataset.s = sig; c.status.textContent = '';
         c.status.append(pill(s[0].toUpperCase() + s.slice(1), s));
+        if (c.k.archived) c.status.append(pill('Archived', 'archived'));
       }
       c.lf.textContent = s === 'deactivated' ? '\u2014' : left(c.k);
       c.deact.hidden = s !== 'active';
-      c.rel.hidden = !c.k.used;
+      c.rel.hidden = !c.k.used || c.k.archived;
+      // Archive only once a key is deactivated or expired; Unarchive is always available
+      c.arch.hidden = !(c.k.archived || s === 'deactivated' || s === 'expired');
     }
   }
 
+  $('#showarch').checked = store.get('kg_showarch') === '1';
+  $('#showarch').addEventListener('change', () => { store.set('kg_showarch', $('#showarch').checked ? '1' : '0'); render(); });
   $('#search').addEventListener('input', render);
   $('#filter').addEventListener('change', render);
 
